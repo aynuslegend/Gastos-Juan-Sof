@@ -2,7 +2,7 @@
   "name": "Gastos Compartidos",
   "short_name": "Gastos",
   "description": "Tracker de gastos en pareja",
-  "start_url": "/",
+  "start_url": "/Gastos-Juan-Sof/",
   "display": "standalone",
   "background_color": "#f9fafb",
   "theme_color": "#4f46e5",

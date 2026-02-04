@@ -1,10 +1,10 @@
-const CACHE_NAME = 'gastos-v19';
+const CACHE_NAME = 'gastos-v2';
 const urlsToCache = [
-  '/',
-  '/index.html',
-  '/manifest.json',
-  '/icon-192.png',
-  '/icon-512.png'
+  '/Gastos-Juan-Sof/',
+  '/Gastos-Juan-Sof/index.html',
+  '/Gastos-Juan-Sof/manifest.json',
+  '/Gastos-Juan-Sof/icon-192.png',
+  '/Gastos-Juan-Sof/icon-512.png'
 ];
 
 self.addEventListener('install', event => {
