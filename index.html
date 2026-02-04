@@ -27,7 +27,7 @@
     // ============================================
     // CONFIGURACIÓN - Tu Google Apps Script URL
     // ============================================
-    const WEBAPP_URL = 'https://script.google.com/macros/s/AKfycby__imcDSh8pP9LEWIjgaop8JW65HWJ6b9pKnHJRBV3VtuLgwUPwPxFaAPOAtV7kst1/exec';
+    const WEBAPP_URL = 'https://script.google.com/macros/s/AKfycbzpWPaOXGPb_vrhKZ7nRy__-a2MHjI6MKI37AIIKLfRE8bEgWC1wjfkpP7ZA9jpyng/exec';
 
     // ============================================
     // DATOS DE LA APP
@@ -174,16 +174,11 @@
     async function fetchExpensesFromSheet() {
       state.isSyncing = true;
       render();
-
+      
       try {
         const response = await fetch(WEBAPP_URL);
-
-        if (!response.ok) {
-          throw new Error(`HTTP error! status: ${response.status}`);
-        }
-
         const result = await response.json();
-
+        
         if (result.success && result.data) {
           state.expenses = result.data
             .filter(e => e.id && e.fecha)
@@ -193,17 +188,11 @@
               return dateB - dateA;
             });
           state.lastSync = new Date();
-        } else {
-          throw new Error('Respuesta inválida del servidor');
         }
       } catch (error) {
         console.error('Error obteniendo gastos:', error);
-        // Solo mostrar alerta si el usuario hizo la sincronización manualmente
-        if (state.activeTab === 'history') {
-          alert('❌ Error al sincronizar. Verificá tu conexión a internet.');
-        }
       }
-
+      
       state.isSyncing = false;
       render();
     }
@@ -212,18 +201,13 @@
       try {
         const response = await fetch(WEBAPP_URL, {
           method: 'POST',
+          mode: 'no-cors',
           headers: {
             'Content-Type': 'application/json',
           },
           body: JSON.stringify(expense)
         });
-
-        if (!response.ok) {
-          throw new Error(`HTTP error! status: ${response.status}`);
-        }
-
-        const result = await response.json();
-        return result;
+        return { success: true };
       } catch (error) {
         console.error('Error enviando a Google Sheets:', error);
         return { success: false, error: error.message };
@@ -234,18 +218,13 @@
       try {
         const response = await fetch(WEBAPP_URL, {
           method: 'POST',
+          mode: 'no-cors',
           headers: {
             'Content-Type': 'application/json',
           },
           body: JSON.stringify({ action: 'delete', id: id })
         });
-
-        if (!response.ok) {
-          throw new Error(`HTTP error! status: ${response.status}`);
-        }
-
-        const result = await response.json();
-        return result;
+        return { success: true };
       } catch (error) {
         console.error('Error borrando de Google Sheets:', error);
         return { success: false, error: error.message };
@@ -287,41 +266,34 @@
         timestamp: new Date().toISOString()
       };
 
-      const result = await sendToGoogleSheets(expense);
+      await sendToGoogleSheets(expense);
 
       state.isLoading = false;
+      state.showSuccess = true;
 
-      if (result.success) {
-        state.showSuccess = true;
+      // Reset form
+      state.formData = {
+        ...state.formData,
+        producto: '',
+        categoria: '',
+        monto: '',
+        medioPago: '',
+        comercio: '',
+        notas: ''
+      };
+      state.errors = {};
 
-        // Reset form
-        state.formData = {
-          ...state.formData,
-          producto: '',
-          categoria: '',
-          monto: '',
-          medioPago: '',
-          comercio: '',
-          notas: ''
-        };
-        state.errors = {};
+      render();
 
+      // Recargar datos desde Google Sheets después de 1 segundo
+      setTimeout(() => {
+        fetchExpensesFromSheet();
+      }, 1500);
+
+      setTimeout(() => {
+        state.showSuccess = false;
         render();
-
-        // Recargar datos desde Google Sheets después de 1.5 segundos
-        setTimeout(() => {
-          fetchExpensesFromSheet();
-        }, 1500);
-
-        setTimeout(() => {
-          state.showSuccess = false;
-          render();
-        }, 2000);
-      } else {
-        // Mostrar error
-        alert('❌ Error al guardar el gasto. Por favor, intentá de nuevo.');
-        render();
-      }
+      }, 2000);
     }
 
     async function handleDelete(id) {
@@ -332,24 +304,17 @@
       state.isDeleting = id;
       render();
 
-      const result = await deleteFromGoogleSheets(id);
+      await deleteFromGoogleSheets(id);
 
-      if (result.success) {
-        // Remover localmente mientras se sincroniza
-        state.expenses = state.expenses.filter(e => e.id !== id);
-        state.isDeleting = null;
-        render();
+      // Remover localmente mientras se sincroniza
+      state.expenses = state.expenses.filter(e => e.id !== id);
+      state.isDeleting = null;
+      render();
 
-        // Recargar datos desde Google Sheets
-        setTimeout(() => {
-          fetchExpensesFromSheet();
-        }, 1000);
-      } else {
-        // Mostrar error
-        state.isDeleting = null;
-        alert('❌ Error al borrar el gasto. Por favor, intentá de nuevo.');
-        render();
-      }
+      // Recargar datos desde Google Sheets
+      setTimeout(() => {
+        fetchExpensesFromSheet();
+      }, 1000);
     }
 
     // ============================================
