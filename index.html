@@ -1,0 +1,747 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+  <meta name="theme-color" content="#4f46e5">
+  <meta name="apple-mobile-web-app-capable" content="yes">
+  <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+  <meta name="apple-mobile-web-app-title" content="Gastos">
+  <link rel="manifest" href="manifest.json">
+  <link rel="apple-touch-icon" href="icon-192.png">
+  <title>💰 Gastos Compartidos</title>
+  <script src="https://cdn.tailwindcss.com"></script>
+  <style>
+    * { -webkit-tap-highlight-color: transparent; }
+    body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; }
+    .loading { opacity: 0.7; pointer-events: none; }
+    input[type="date"]::-webkit-calendar-picker-indicator { filter: invert(0.5); }
+    .delete-btn { transition: all 0.2s; }
+    .delete-btn:active { transform: scale(0.95); }
+  </style>
+</head>
+<body class="bg-gray-50 min-h-screen">
+  <div id="app"></div>
+
+  <script>
+    // ============================================
+    // CONFIGURACIÓN - Tu Google Apps Script URL
+    // ============================================
+    const WEBAPP_URL = 'https://script.google.com/macros/s/AKfycbzJhJsbztIgwS8lfeFk68FH-u3ceq121SJccCNA8hku-HgeiS6V4cFMSPOcllQSMjJS/exec';
+
+    // ============================================
+    // DATOS DE LA APP
+    // ============================================
+    const categorias = [
+      '🍔 Alimentación', '🏠 Hogar', '🚗 Transporte', '💊 Salud',
+      '🎬 Entretenimiento', '👕 Ropa', '📱 Servicios', '🎁 Regalos',
+      '📚 Educación', '🐕 Mascotas', '💰 Ahorro/Inversión', '📦 Otros'
+    ];
+
+    const mediosPago = [
+      '💵 Efectivo', '💳 Débito', '💳 Crédito',
+      '📱 Transferencia', '📱 MercadoPago', '💳 Tarjeta MercadoPago',
+      '🍋 Lemon', '📱 Otras billeteras'
+    ];
+
+    const personas = ['👤 Juan', '👤 Sof', '👥 Compartido'];
+
+    // ============================================
+    // ESTADO DE LA APP
+    // ============================================
+    let state = {
+      formData: {
+        fecha: new Date().toLocaleDateString('en-CA'),
+        producto: '',
+        categoria: '',
+        monto: '',
+        medioPago: '',
+        persona: '',
+        comercio: '',
+        notas: ''
+      },
+      expenses: [],
+      activeTab: 'form',
+      isLoading: false,
+      isSyncing: false,
+      isDeleting: null,
+      showSuccess: false,
+      errors: {},
+      dolarBlue: null,
+      dolarLoading: true,
+      lastSync: null
+    };
+
+    // ============================================
+    // FUNCIONES DE UTILIDAD
+    // ============================================
+    function formatCurrency(amount) {
+      return new Intl.NumberFormat('es-AR', {
+        style: 'currency',
+        currency: 'ARS'
+      }).format(amount);
+    }
+
+    function formatUSD(amount) {
+      return new Intl.NumberFormat('en-US', {
+        style: 'currency',
+        currency: 'USD'
+      }).format(amount);
+    }
+
+    function formatDate(dateString) {
+      if (!dateString) return '';
+      const date = typeof dateString === 'string' ? dateString.split('T')[0] : dateString;
+      return new Date(date + 'T12:00:00').toLocaleDateString('es-AR', {
+        weekday: 'short',
+        day: 'numeric',
+        month: 'short'
+      });
+    }
+
+    function getTotalMonth() {
+      const currentMonth = new Date().getMonth();
+      const currentYear = new Date().getFullYear();
+      return state.expenses
+        .filter(e => {
+          if (!e.fecha) return false;
+          const dateStr = typeof e.fecha === 'string' ? e.fecha.split('T')[0] : e.fecha;
+          const d = new Date(dateStr);
+          return d.getMonth() === currentMonth && d.getFullYear() === currentYear;
+        })
+        .reduce((sum, e) => sum + parseFloat(e.monto || 0), 0);
+    }
+
+    function getTotalMonthUSD() {
+      const currentMonth = new Date().getMonth();
+      const currentYear = new Date().getFullYear();
+      return state.expenses
+        .filter(e => {
+          if (!e.fecha) return false;
+          const dateStr = typeof e.fecha === 'string' ? e.fecha.split('T')[0] : e.fecha;
+          const d = new Date(dateStr);
+          return d.getMonth() === currentMonth && d.getFullYear() === currentYear;
+        })
+        .reduce((sum, e) => sum + parseFloat(e.montoUSD || 0), 0);
+    }
+
+    function getTotalMonthByPersonUSD(persona) {
+      const currentMonth = new Date().getMonth();
+      const currentYear = new Date().getFullYear();
+      return state.expenses
+        .filter(e => {
+          if (!e.fecha || !e.persona) return false;
+          const dateStr = typeof e.fecha === 'string' ? e.fecha.split('T')[0] : e.fecha;
+          const d = new Date(dateStr);
+          const isCurrentMonth = d.getMonth() === currentMonth && d.getFullYear() === currentYear;
+          const matchPersona = e.persona.includes(persona);
+          return isCurrentMonth && matchPersona;
+        })
+        .reduce((sum, e) => sum + parseFloat(e.montoUSD || 0), 0);
+    }
+
+    // ============================================
+    // API - DÓLAR BLUE
+    // ============================================
+    async function fetchDolarBlue() {
+      try {
+        const response = await fetch('https://dolarapi.com/v1/dolares/blue');
+        const data = await response.json();
+        const promedio = (data.compra + data.venta) / 2;
+        state.dolarBlue = {
+          compra: data.compra,
+          venta: data.venta,
+          promedio: promedio,
+          fechaActualizacion: data.fechaActualizacion
+        };
+        state.dolarLoading = false;
+        render();
+      } catch (error) {
+        console.error('Error obteniendo dólar blue:', error);
+        state.dolarLoading = false;
+        render();
+      }
+    }
+
+    function calcularMontoUSD(montoARS) {
+      if (!state.dolarBlue || !montoARS) return null;
+      return parseFloat(montoARS) / state.dolarBlue.promedio;
+    }
+
+    // ============================================
+    // API - CONEXIÓN CON GOOGLE SHEETS
+    // ============================================
+    async function fetchExpensesFromSheet() {
+      state.isSyncing = true;
+      render();
+
+      try {
+        const response = await fetch(WEBAPP_URL);
+
+        if (!response.ok) {
+          throw new Error(`HTTP error! status: ${response.status}`);
+        }
+
+        const result = await response.json();
+
+        if (result.success && result.data) {
+          state.expenses = result.data
+            .filter(e => e.id && e.fecha)
+            .sort((a, b) => {
+              const dateA = new Date(a.timestamp || a.fecha);
+              const dateB = new Date(b.timestamp || b.fecha);
+              return dateB - dateA;
+            });
+          state.lastSync = new Date();
+        } else {
+          throw new Error('Respuesta inválida del servidor');
+        }
+      } catch (error) {
+        console.error('Error obteniendo gastos:', error);
+        // Solo mostrar alerta si el usuario hizo la sincronización manualmente
+        if (state.activeTab === 'history') {
+          alert('❌ Error al sincronizar. Verificá tu conexión a internet.');
+        }
+      }
+
+      state.isSyncing = false;
+      render();
+    }
+
+    async function sendToGoogleSheets(expense) {
+      try {
+        const response = await fetch(WEBAPP_URL, {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+          },
+          body: JSON.stringify(expense)
+        });
+
+        if (!response.ok) {
+          throw new Error(`HTTP error! status: ${response.status}`);
+        }
+
+        const result = await response.json();
+        return result;
+      } catch (error) {
+        console.error('Error enviando a Google Sheets:', error);
+        return { success: false, error: error.message };
+      }
+    }
+
+    async function deleteFromGoogleSheets(id) {
+      try {
+        const response = await fetch(WEBAPP_URL, {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+          },
+          body: JSON.stringify({ action: 'delete', id: id })
+        });
+
+        if (!response.ok) {
+          throw new Error(`HTTP error! status: ${response.status}`);
+        }
+
+        const result = await response.json();
+        return result;
+      } catch (error) {
+        console.error('Error borrando de Google Sheets:', error);
+        return { success: false, error: error.message };
+      }
+    }
+
+    // ============================================
+    // VALIDACIÓN Y ENVÍO DEL FORMULARIO
+    // ============================================
+    function validateForm() {
+      const errors = {};
+      if (!state.formData.producto.trim()) errors.producto = 'Requerido';
+      if (!state.formData.categoria) errors.categoria = 'Requerido';
+      if (!state.formData.monto || parseFloat(state.formData.monto) <= 0) errors.monto = 'Ingresá un monto válido';
+      if (!state.formData.medioPago) errors.medioPago = 'Requerido';
+      if (!state.formData.persona) errors.persona = 'Requerido';
+      state.errors = errors;
+      return Object.keys(errors).length === 0;
+    }
+
+    async function handleSubmit() {
+      if (!validateForm()) {
+        render();
+        return;
+      }
+
+      state.isLoading = true;
+      render();
+
+      const montoARS = parseFloat(state.formData.monto);
+      const montoUSD = calcularMontoUSD(montoARS);
+      const cotizacionUsada = state.dolarBlue ? state.dolarBlue.promedio : null;
+
+      const expense = {
+        ...state.formData,
+        monto: montoARS,
+        montoUSD: montoUSD ? montoUSD.toFixed(2) : '',
+        cotizacionDolar: cotizacionUsada ? cotizacionUsada.toFixed(2) : '',
+        timestamp: new Date().toISOString()
+      };
+
+      const result = await sendToGoogleSheets(expense);
+
+      state.isLoading = false;
+
+      if (result.success) {
+        state.showSuccess = true;
+
+        // Reset form
+        state.formData = {
+          ...state.formData,
+          producto: '',
+          categoria: '',
+          monto: '',
+          medioPago: '',
+          comercio: '',
+          notas: ''
+        };
+        state.errors = {};
+
+        render();
+
+        // Recargar datos desde Google Sheets después de 1.5 segundos
+        setTimeout(() => {
+          fetchExpensesFromSheet();
+        }, 1500);
+
+        setTimeout(() => {
+          state.showSuccess = false;
+          render();
+        }, 2000);
+      } else {
+        // Mostrar error
+        alert('❌ Error al guardar el gasto. Por favor, intentá de nuevo.');
+        render();
+      }
+    }
+
+    async function handleDelete(id) {
+      if (!confirm('¿Estás seguro de que querés borrar este gasto?')) {
+        return;
+      }
+
+      state.isDeleting = id;
+      render();
+
+      const result = await deleteFromGoogleSheets(id);
+
+      if (result.success) {
+        // Remover localmente mientras se sincroniza
+        state.expenses = state.expenses.filter(e => e.id !== id);
+        state.isDeleting = null;
+        render();
+
+        // Recargar datos desde Google Sheets
+        setTimeout(() => {
+          fetchExpensesFromSheet();
+        }, 1000);
+      } else {
+        // Mostrar error
+        state.isDeleting = null;
+        alert('❌ Error al borrar el gasto. Por favor, intentá de nuevo.');
+        render();
+      }
+    }
+
+    // ============================================
+    // RENDER DE LA APP
+    // ============================================
+    function render() {
+      const app = document.getElementById('app');
+      const montoActual = parseFloat(state.formData.monto) || 0;
+      const montoUSDPreview = calcularMontoUSD(montoActual);
+      
+      app.innerHTML = `
+        <div class="min-h-screen bg-gray-50 ${state.isLoading ? 'loading' : ''}">
+          <!-- Header -->
+          <div class="bg-gradient-to-r from-indigo-600 to-purple-600 text-white p-6 pb-20 rounded-b-3xl">
+            <div class="flex justify-between items-center mb-4">
+              <div>
+                <h1 class="text-xl font-bold">💰 Gastos Compartidos</h1>
+                <p class="text-indigo-200 text-sm">Juan & Sof</p>
+              </div>
+              <div class="text-right">
+                <p class="text-indigo-200 text-xs">Este mes</p>
+                <p class="text-2xl font-bold">${formatCurrency(getTotalMonth())}</p>
+                ${getTotalMonthUSD() > 0 ? `<p class="text-indigo-200 text-sm">${formatUSD(getTotalMonthUSD())}</p>` : ''}
+              </div>
+            </div>
+            
+            <!-- Cotización Dólar Blue -->
+            <div class="bg-white/20 rounded-xl p-3 mt-2">
+              <div class="flex justify-between items-center">
+                <span class="text-sm">💵 Dólar Blue</span>
+                ${state.dolarLoading 
+                  ? '<span class="text-sm">Cargando...</span>'
+                  : state.dolarBlue 
+                    ? `<div class="text-right">
+                        <span class="font-bold">$${state.dolarBlue.promedio.toFixed(2)}</span>
+                        <span class="text-xs text-indigo-200 block">Compra: $${state.dolarBlue.compra} | Venta: $${state.dolarBlue.venta}</span>
+                      </div>`
+                    : '<span class="text-sm text-red-200">Error al cargar</span>'
+                }
+              </div>
+            </div>
+            
+            <!-- Gastos por persona -->
+            <div class="bg-white/20 rounded-xl p-3 mt-2">
+              <p class="text-xs text-indigo-200 mb-2">Gastos del mes por persona (USD)</p>
+              <div class="grid grid-cols-3 gap-2 text-center">
+                <div>
+                  <p class="text-xs text-indigo-200">👤 Juan</p>
+                  <p class="font-bold">${formatUSD(getTotalMonthByPersonUSD('Juan'))}</p>
+                </div>
+                <div>
+                  <p class="text-xs text-indigo-200">👤 Sof</p>
+                  <p class="font-bold">${formatUSD(getTotalMonthByPersonUSD('Sof'))}</p>
+                </div>
+                <div>
+                  <p class="text-xs text-indigo-200">👥 Compartido</p>
+                  <p class="font-bold">${formatUSD(getTotalMonthByPersonUSD('Compartido'))}</p>
+                </div>
+              </div>
+            </div>
+          </div>
+
+          <!-- Tabs -->
+          <div class="mx-4 -mt-12 bg-white rounded-2xl shadow-lg overflow-hidden">
+            <div class="flex border-b">
+              <button onclick="setTab('form')" class="flex-1 py-4 text-sm font-medium transition-colors ${
+                state.activeTab === 'form'
+                  ? 'text-indigo-600 border-b-2 border-indigo-600'
+                  : 'text-gray-500'
+              }">
+                ➕ Nuevo Gasto
+              </button>
+              <button onclick="setTab('history')" class="flex-1 py-4 text-sm font-medium transition-colors ${
+                state.activeTab === 'history'
+                  ? 'text-indigo-600 border-b-2 border-indigo-600'
+                  : 'text-gray-500'
+              }">
+                📋 Historial (${state.expenses.length})
+              </button>
+            </div>
+
+            ${state.activeTab === 'form' ? renderForm(montoUSDPreview) : renderHistory()}
+          </div>
+
+          <!-- Loading Indicator -->
+          ${state.isLoading ? `
+            <div class="fixed inset-0 bg-black bg-opacity-30 flex items-center justify-center z-50">
+              <div class="bg-white p-6 rounded-2xl shadow-xl">
+                <div class="animate-spin w-8 h-8 border-4 border-indigo-600 border-t-transparent rounded-full mx-auto"></div>
+                <p class="mt-3 text-gray-600">Guardando...</p>
+              </div>
+            </div>
+          ` : ''}
+
+          <div class="h-8"></div>
+        </div>
+      `;
+
+      // Restaurar valores de los inputs después del render
+      setTimeout(() => {
+        const fechaInput = document.getElementById('fecha');
+        const productoInput = document.getElementById('producto');
+        const montoInput = document.getElementById('monto');
+        const comercioInput = document.getElementById('comercio');
+        const notasInput = document.getElementById('notas');
+        
+        if (fechaInput) fechaInput.value = state.formData.fecha;
+        if (productoInput) productoInput.value = state.formData.producto;
+        if (montoInput) montoInput.value = state.formData.monto;
+        if (comercioInput) comercioInput.value = state.formData.comercio;
+        if (notasInput) notasInput.value = state.formData.notas;
+      }, 0);
+    }
+
+    function renderForm(montoUSDPreview) {
+      return `
+        <div class="p-5">
+          <!-- Success Message -->
+          ${state.showSuccess ? `
+            <div class="mb-4 p-4 bg-green-50 border border-green-200 rounded-xl flex items-center gap-2">
+              <span class="text-green-600 text-lg">✓</span>
+              <span class="text-green-700 font-medium">¡Gasto registrado!</span>
+            </div>
+          ` : ''}
+
+          <!-- Fecha -->
+          <div class="mb-4">
+            <label class="block text-sm font-medium text-gray-700 mb-1">📅 Fecha</label>
+            <input
+              type="date"
+              id="fecha"
+              onchange="updateField('fecha', this.value)"
+              class="w-full p-3 border-2 border-gray-200 rounded-xl focus:border-indigo-500 focus:outline-none"
+            >
+          </div>
+
+          <!-- Producto -->
+          <div class="mb-4">
+            <label class="block text-sm font-medium text-gray-700 mb-1">🛒 ¿Qué compraste?</label>
+            <input
+              type="text"
+              id="producto"
+              onchange="updateField('producto', this.value)"
+              oninput="updateField('producto', this.value)"
+              placeholder="Ej: Supermercado, Nafta, Netflix..."
+              class="w-full p-3 border-2 ${state.errors.producto ? 'border-red-300' : 'border-gray-200'} rounded-xl focus:border-indigo-500 focus:outline-none"
+            >
+            ${state.errors.producto ? `<p class="text-red-500 text-xs mt-1">${state.errors.producto}</p>` : ''}
+          </div>
+
+          <!-- Monto -->
+          <div class="mb-4">
+            <label class="block text-sm font-medium text-gray-700 mb-1">💵 Monto en Pesos</label>
+            <div class="relative">
+              <span class="absolute left-3 top-1/2 -translate-y-1/2 text-gray-500">$</span>
+              <input
+                type="number"
+                inputmode="decimal"
+                id="monto"
+                onchange="updateField('monto', this.value)"
+                oninput="updateField('monto', this.value); updateUSDPreview();"
+                placeholder="0.00"
+                class="w-full p-3 pl-8 border-2 ${state.errors.monto ? 'border-red-300' : 'border-gray-200'} rounded-xl focus:border-indigo-500 focus:outline-none text-lg font-semibold"
+              >
+            </div>
+            ${state.errors.monto ? `<p class="text-red-500 text-xs mt-1">${state.errors.monto}</p>` : ''}
+            
+            <!-- Conversión a USD -->
+            <div id="usd-preview" class="mt-2 ${montoUSDPreview && state.dolarBlue ? '' : 'hidden'}">
+              <div class="p-3 bg-green-50 border border-green-200 rounded-xl">
+                <div class="flex justify-between items-center">
+                  <span class="text-sm text-green-700">💵 Equivalente en USD</span>
+                  <span id="usd-amount" class="font-bold text-green-700">${montoUSDPreview ? formatUSD(montoUSDPreview) : ''}</span>
+                </div>
+                <p class="text-xs text-green-600 mt-1">Cotización: $${state.dolarBlue ? state.dolarBlue.promedio.toFixed(2) : '0'} (promedio blue)</p>
+              </div>
+            </div>
+          </div>
+
+          <!-- Categoría -->
+          <div class="mb-4">
+            <label class="block text-sm font-medium text-gray-700 mb-1">📁 Categoría</label>
+            <div class="grid grid-cols-2 gap-2">
+              ${categorias.map(cat => `
+                <button
+                  type="button"
+                  onclick="updateField('categoria', '${cat}')"
+                  class="p-3 text-sm rounded-xl border-2 transition-all text-left ${
+                    state.formData.categoria === cat
+                      ? 'border-indigo-500 bg-indigo-50 text-indigo-700 font-medium'
+                      : 'border-gray-200 bg-white'
+                  }"
+                >
+                  ${cat}
+                </button>
+              `).join('')}
+            </div>
+            ${state.errors.categoria ? `<p class="text-red-500 text-xs mt-1">${state.errors.categoria}</p>` : ''}
+          </div>
+
+          <!-- Medio de Pago -->
+          <div class="mb-4">
+            <label class="block text-sm font-medium text-gray-700 mb-1">💳 Medio de Pago</label>
+            <div class="grid grid-cols-2 gap-2">
+              ${mediosPago.map(mp => `
+                <button
+                  type="button"
+                  onclick="updateField('medioPago', '${mp}')"
+                  class="p-3 text-sm rounded-xl border-2 transition-all text-left ${
+                    state.formData.medioPago === mp
+                      ? 'border-indigo-500 bg-indigo-50 text-indigo-700 font-medium'
+                      : 'border-gray-200 bg-white'
+                  }"
+                >
+                  ${mp}
+                </button>
+              `).join('')}
+            </div>
+            ${state.errors.medioPago ? `<p class="text-red-500 text-xs mt-1">${state.errors.medioPago}</p>` : ''}
+          </div>
+
+          <!-- Quién pagó -->
+          <div class="mb-4">
+            <label class="block text-sm font-medium text-gray-700 mb-1">👤 ¿Quién pagó?</label>
+            <div class="grid grid-cols-3 gap-2">
+              ${personas.map(p => `
+                <button
+                  type="button"
+                  onclick="updateField('persona', '${p}')"
+                  class="p-3 text-sm rounded-xl border-2 transition-all text-center ${
+                    state.formData.persona === p
+                      ? 'border-indigo-500 bg-indigo-50 text-indigo-700 font-medium'
+                      : 'border-gray-200 bg-white'
+                  }"
+                >
+                  ${p}
+                </button>
+              `).join('')}
+            </div>
+            ${state.errors.persona ? `<p class="text-red-500 text-xs mt-1">${state.errors.persona}</p>` : ''}
+          </div>
+
+          <!-- Comercio -->
+          <div class="mb-4">
+            <label class="block text-sm font-medium text-gray-700 mb-1">🏪 Comercio (opcional)</label>
+            <input
+              type="text"
+              id="comercio"
+              onchange="updateField('comercio', this.value)"
+              oninput="updateField('comercio', this.value)"
+              placeholder="Ej: Carrefour, YPF, etc."
+              class="w-full p-3 border-2 border-gray-200 rounded-xl focus:border-indigo-500 focus:outline-none"
+            >
+          </div>
+
+          <!-- Notas -->
+          <div class="mb-4">
+            <label class="block text-sm font-medium text-gray-700 mb-1">📝 Notas (opcional)</label>
+            <textarea
+              id="notas"
+              onchange="updateField('notas', this.value)"
+              oninput="updateField('notas', this.value)"
+              placeholder="Cualquier detalle adicional..."
+              rows="2"
+              class="w-full p-3 border-2 border-gray-200 rounded-xl focus:border-indigo-500 focus:outline-none resize-none"
+            ></textarea>
+          </div>
+
+          <!-- Submit Button -->
+          <button
+            onclick="handleSubmit()"
+            class="w-full py-4 bg-gradient-to-r from-indigo-600 to-purple-600 text-white font-semibold rounded-xl shadow-lg active:scale-95 transition-transform mt-4"
+          >
+            ✓ Registrar Gasto
+          </button>
+        </div>
+      `;
+    }
+
+    function renderHistory() {
+      return `
+        <div class="p-4">
+          <!-- Sync button -->
+          <div class="flex justify-between items-center mb-3">
+            <span class="text-xs text-gray-500">
+              ${state.lastSync ? `Última sync: ${state.lastSync.toLocaleTimeString('es-AR')}` : ''}
+            </span>
+            <button
+              onclick="fetchExpensesFromSheet()"
+              class="text-sm text-indigo-600 flex items-center gap-1 ${state.isSyncing ? 'opacity-50' : ''}"
+              ${state.isSyncing ? 'disabled' : ''}
+            >
+              <span class="${state.isSyncing ? 'animate-spin' : ''}">🔄</span>
+              ${state.isSyncing ? 'Sincronizando...' : 'Sincronizar'}
+            </button>
+          </div>
+
+          ${state.expenses.length === 0 ? `
+            <div class="text-center py-12 text-gray-500">
+              <p class="text-4xl mb-2">📭</p>
+              <p>No hay gastos registrados</p>
+              <p class="text-sm">¡Empezá a trackear tus gastos!</p>
+            </div>
+          ` : `
+            <div class="space-y-3 max-h-96 overflow-y-auto">
+              ${state.expenses.map(expense => `
+                <div class="bg-gray-50 rounded-xl p-4 border border-gray-100 ${state.isDeleting === expense.id ? 'opacity-50' : ''}">
+                  <div class="flex justify-between items-start mb-2">
+                    <div class="flex-1">
+                      <p class="font-semibold text-gray-800">${expense.producto || 'Sin nombre'}</p>
+                      <p class="text-xs text-gray-500">${expense.comercio || expense.categoria || ''}</p>
+                    </div>
+                    <div class="text-right mr-2">
+                      <p class="font-bold text-lg text-indigo-600">${formatCurrency(expense.monto || 0)}</p>
+                      ${expense.montoUSD ? `<p class="text-xs text-green-600">${formatUSD(parseFloat(expense.montoUSD))}</p>` : ''}
+                    </div>
+                    <button
+                      onclick="handleDelete('${expense.id}')"
+                      class="delete-btn text-red-400 hover:text-red-600 p-1"
+                      title="Borrar gasto"
+                      ${state.isDeleting === expense.id ? 'disabled' : ''}
+                    >
+                      🗑️
+                    </button>
+                  </div>
+                  <div class="flex gap-2 flex-wrap">
+                    <span class="text-xs bg-gray-200 text-gray-600 px-2 py-1 rounded-full">
+                      ${formatDate(expense.fecha)}
+                    </span>
+                    <span class="text-xs bg-indigo-100 text-indigo-600 px-2 py-1 rounded-full">
+                      ${expense.medioPago || ''}
+                    </span>
+                    <span class="text-xs bg-purple-100 text-purple-600 px-2 py-1 rounded-full">
+                      ${expense.persona || ''}
+                    </span>
+                  </div>
+                </div>
+              `).join('')}
+            </div>
+          `}
+        </div>
+      `;
+    }
+
+    // ============================================
+    // EVENT HANDLERS
+    // ============================================
+    function setTab(tab) {
+      state.activeTab = tab;
+      if (tab === 'history') {
+        fetchExpensesFromSheet();
+      }
+      render();
+    }
+
+    function updateField(field, value) {
+      state.formData[field] = value;
+      if (state.errors[field]) {
+        delete state.errors[field];
+      }
+      if (['categoria', 'medioPago', 'persona'].includes(field)) {
+        render();
+      }
+    }
+
+    function updateUSDPreview() {
+      const preview = document.getElementById('usd-preview');
+      const amountSpan = document.getElementById('usd-amount');
+      if (!preview || !amountSpan) return;
+      
+      const monto = parseFloat(state.formData.monto) || 0;
+      const montoUSD = calcularMontoUSD(monto);
+      
+      if (montoUSD && state.dolarBlue) {
+        preview.classList.remove('hidden');
+        amountSpan.textContent = formatUSD(montoUSD);
+      } else {
+        preview.classList.add('hidden');
+      }
+    }
+
+    // ============================================
+    // INICIALIZACIÓN
+    // ============================================
+    
+    if ('serviceWorker' in navigator) {
+      navigator.serviceWorker.register('sw.js').catch(err => console.log('SW error:', err));
+    }
+
+    fetchDolarBlue();
+    fetchExpensesFromSheet();
+    render();
+  </script>
+</body>
+</html>
